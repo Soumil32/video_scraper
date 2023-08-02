@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, error::Error, fs::{self, File}, io::Write};
+use std::{collections::HashMap, env, error::Error, fs::{self, File, OpenOptions}, io::Write};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -7,6 +7,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     for video in videos {
         if video.len() > 0 {
+            if video.starts_with("#") {
+                continue;
+            }
             let video = video.split("|").collect::<Vec<&str>>();
             let url = video[0];
             let file_path = video[1];
@@ -59,9 +62,19 @@ async fn download_video(url: String, file_path: String) {
         results.insert(order, segment);
     }
 
-    let mut video_file = File::create(file_path + ".ts").unwrap();
+    let mut video_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(file_path + ".ts")
+        .unwrap();
+    println!("{}", results.len() == index_m3u8.segments.len());
+    let mut buffer = Vec::new();
     for i in 0..results.len() {
-        video_file.write_all(&results[&(i as u16)]).unwrap();
+        buffer.append(results.entry(i as u16).or_default());
+    }
+    match video_file.write_all(&buffer) {
+        Ok(_) => println!("Video downloaded"),
+        Err(e) => println!("Error writing to file: {}", e)
     }
 }
 
@@ -78,7 +91,21 @@ async fn download_segment(url: String, order: u16) -> (u16, Vec<u8>) {
     
     match segment {
         Ok(segment) => {
-            bytes = segment.bytes().await.unwrap().to_vec();
+            if segment.status().is_success() {
+                bytes = segment.bytes().await.unwrap().to_vec();
+            } else {
+                loop {
+                    let segment_res = reqwest_client.get(&url).send().await;
+                
+                    if let Ok(segment) = segment_res {
+                        if !segment.status().is_success() {
+                            continue;
+                        }
+                        bytes = segment.bytes().await.unwrap().to_vec();
+                        break;
+                    }
+                }
+            }
         }
         Err(e) => {
             if e.is_redirect() {
@@ -95,9 +122,8 @@ async fn download_segment(url: String, order: u16) -> (u16, Vec<u8>) {
                 loop{
                     let segment = reqwest_client.get(&url).send().await;
                 
-                    if let Err(e) = segment {
-                        //panic!("Error downloading segment due to timeout: {}", e);
-                    } else {
+                    
+                    if segment.is_ok() {
                         bytes = segment.unwrap().bytes().await.unwrap().to_vec();
                         break;
                     }
@@ -120,7 +146,5 @@ async fn download_segment(url: String, order: u16) -> (u16, Vec<u8>) {
     }
 
     println!("Segment downloaded {}", order);
-    // sleep for a second to avoid getting rate limited
-    //tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     (order, bytes)
 }
